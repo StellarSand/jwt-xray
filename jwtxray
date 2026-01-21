@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+
+# Copyright (C) 2026-present StellarSand
+
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+
+import jwt
+import argparse
+from sys import argv
+import json
+import datetime
+
+
+supported_algs_list = [
+    "HS256",
+    "HS384",
+    "HS512",
+    "ES256",
+    "ES384",
+    "ES512",
+    "RS256",
+    "RS384",
+    "RS512",
+    "PS256",
+    "PS384",
+    "PS512",
+]
+
+alg = ""
+
+
+def usage():
+    print('''
+Usage: 
+python3 jwtxray -t <token>
+
+Description: 
+JWT security analyzer & brute forcer
+
+Options:
+    -h, --help              Show this help message and exit
+    -t, --token             Token to analyze
+    -s, --secret            Secret key for HMAC verification
+    -pk, --pubkey           Public key file in PEM format for RSA/PS/ECDSA verification
+    -w, --wordlist          Wordlist for brute force (HMAC algorithms only)
+
+Examples:
+python3 jwtxray -t eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMn0.KMUFsIDTnFmyG3nMiGM6H9FNFUROf3wh7SmqJp-QV30
+    ''')
+    exit(0)
+
+
+def decode_jwt():
+    try:
+        header = jwt.get_unverified_header(args.token)
+        payload = jwt.decode(args.token, options={"verify_signature": False})
+        return header, payload
+    except Exception as e:
+        print(f"\nFailed to decode JWT\n{e}\n")
+        exit(1)
+
+
+def verify_jwt_with_pubkey():
+    try:
+        with open(args.pubkey_file, "r") as f:
+            pubkey = f.read()
+        
+        jwt.decode(args.token, pubkey, algorithms=alg)
+        print("[INO] Signature verified with provided secret.")
+    except Exception:
+        print("[INFO] Signature invalid with provided secret.")
+
+
+def analyze_jwt():
+    parts = args.token.split(".")
+    if len(parts) != 3:
+        print("Invalid JWT format.")
+        return
+
+    header, payload = decode_jwt()
+    if not header or not payload:
+        print(f"No decoded header or payload found\n")
+        exit(1)
+
+    print(f"\nDecoded header")
+    print(f"--------------\n")
+    print(json.dumps(header, indent=2))
+    
+    print(f"\n##############################################")
+    print(f"\nDecoded payload")
+    print(f"---------------\n")
+    print(json.dumps(payload, indent=2))
+
+    print(f"\n##############################################")
+    print(f"\nSecurity checks")
+    print(f"---------------\n")
+
+    global alg
+    alg = header.get("alg", "")
+
+    if args.hmac_secret and alg.startswith("HS"):
+        try:
+            jwt.decode(args.token, args.hmac_secret, algorithms=alg)
+            print("[INO] Signature verified with provided secret.")
+        except Exception:
+            print("[INFO] Signature invalid with provided secret.")
+    elif args.pubkey_file and (alg.startswith("ES") or alg.startswith("RS") or alg.startswith("PS")):
+        verify_jwt_with_pubkey()
+
+    if alg == "none":
+        print("[WARN] alg=none: CVE-2015-9235 (signature bypass).")
+    elif alg not in supported_algs_list:
+        print(f"[WARN] Uncommon algorithm detected: {alg}")
+
+    # Signature presence
+    if not parts[2]:
+        print("[WARN] Missing signature.")
+    
+    # Issuer
+    if "iss" not in payload:
+        print("[INFO] Missing issuer (iss) claim.")
+    
+    # Audience
+    if "aud" not in payload:
+        print("[INFO] Missing audience (aud) claim.")
+
+    # Expiration
+    current_datetime = int(datetime.datetime.now(datetime.UTC).timestamp())
+    if "exp" not in payload:
+        print("[INFO] Missing expiration time (exp) claim.")
+    elif current_datetime > payload["exp"]:
+        print("[WARN] Token expired.")
+
+    # Not Before
+    if "nbf" in payload and current_datetime < payload["nbf"]:
+        print("[INFO] Token not valid yet.")
+
+    # Issued At
+    if "iat" in payload and payload["iat"] > current_datetime:
+        print("[INFO] Issued at time (iat) is in the future.")
+    
+    # JWT ID
+    if "jid" not in payload:
+        print("[INFO] Missing JWT ID (jid) claim.")
+
+    # Token size
+    if len(args.token) > 4096:
+        print("[WARN] Large token: possible JWT Bomb risk")
+
+    # Suspicious header parameters
+    if "jwk" in header:
+        print("[WARN] JSON Web Key (jwk) present: CVE-2018-0114")
+    if "jku" in header:
+        print("[WARN] JSON Web Key Set URL(jku) present: possible SSRF risk")
+    if "x5u" in header:
+        print("[WARN] X.509 certificate URL (x5u) present: possible SSRF risk")
+    if "kid" in header:
+        print("[WARN] Key ID (kid) present: possible path traversal/SQL injection risk")
+    if "x5c" in header:
+        print("[WARN] X.509 Certificate Chain (x5c) present: CVE-2017-2800, CVE-2018-2633")
+
+
+arg_parser = argparse.ArgumentParser(add_help=False, usage="python3 jwtxray -t <token>")
+arg_parser.add_argument("-h", "--help", action="store_true")
+arg_parser.add_argument("-t", "--token", dest="token")
+arg_parser.add_argument("-s", "--secret", dest="hmac_secret")
+arg_parser.add_argument("-pk", "--pubkey", dest="pubkey_file")
+arg_parser.add_argument("-w", "--wordlist", dest="wordlist")
+args = arg_parser.parse_args()
+
+if len(argv) == 1 or args.help:
+    usage() # Print usage if no options provided or -h/--help provided
+elif not args.token:
+    arg_parser.error(f"No JWT token provided.\nTry 'jwtxray -h' for more info.\n")
+elif args.hmac_secret and args.pubkey_file:
+    arg_parser.error(f"You can not use -s/--secret and -pk/--pubkey options together.\nTry 'jwtxray -h' for more info.\n")
+
+analyze_jwt()
+
+if args.wordlist:
+    if alg.startswith("HS"):
+        print(f"\nAttempting brute force with wordlist ...")
+        try:
+            for word in open(args.wordlist, "r", encoding="utf-8"):
+                word = word.strip()
+                try:
+                    jwt.decode(args.token, word, algorithms=alg)
+                    print(f"[WARN] Weak secret found: {word}")
+                    break
+                except Exception:
+                    continue
+            print("No matching secret found in wordlist.")
+        except FileNotFoundError:
+            print(f"Wordlist file not found: {args.wordlist}")
+            exit(1)
+    else:
+        print(f"\nBrute force only applies to HMAC algorithms (HS256/384/512).\n")
+        exit(1)
+
+print()
+exit()
